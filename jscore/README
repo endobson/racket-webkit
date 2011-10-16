@@ -1,0 +1,4 @@
+This jscore library is a modified version of the one availible in
+the Racket Webkit libray by Thomas Chust <chust@web.de>. The original
+is available here:
+https://bitbucket.org/chust/racket-webkit
