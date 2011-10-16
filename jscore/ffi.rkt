@@ -412,7 +412,7 @@
 (define (call-with-exception-value value thunk)
   (let/ec escape
     (call-with-exception-handler
-     (Î» (e)
+     (λ (e)
        (escape (if (procedure? value) (value) value)))
      thunk)))
 
@@ -420,7 +420,7 @@
   (let/ec escape
     (ptr-set! exception _jsvalue/null #f)
     (call-with-exception-handler
-     (Î» (e)
+     (λ (e)
        (ptr-set! exception _jsvalue/null (scheme->js context e))
        (escape #f))
      thunk)))
@@ -443,18 +443,18 @@
     #;on-initialize
     #f
     #;on-has-key
-    (Î» (context object key)
+    (λ (context object key)
       (call-with-exception-value
        #f
-       (Î» ()
+       (λ ()
          (ensure-dict+key 'dict-has-key?
                           (jsobject-data object) (jsstring->string key))
          #t)))
     #;on-ref
-    (Î» (context object key exception)
+    (λ (context object key exception)
       (call-with-exception-cell
        context exception
-       (Î» ()
+       (λ ()
          (scheme->js
           context
           (call-with-values
@@ -462,53 +462,53 @@
                 (jsobject-data object) (jsstring->string key))
            dict-ref)))))
     #;on-set
-    (Î» (context object key value exception)
+    (λ (context object key value exception)
       (call-with-exception-cell
        context exception
-       (Î» ()
+       (λ ()
          (call-with-values
           (cut ensure-dict+key 'dict-set!
                (jsobject-data object) (jsstring->string key))
           (cut dict-set! <> <> (js->scheme context value)))
          #t)))
     #;on-remove
-    (Î» (context object key exception)
+    (λ (context object key exception)
       (call-with-exception-cell
        context exception
-       (Î» ()
+       (λ ()
          (call-with-values
           (cut ensure-dict+key 'dict-remove!
                (jsobject-data object) (jsstring->string key))
           dict-remove!)
          #t)))
     #;on-keys
-    (Î» (context object keys)
+    (λ (context object keys)
       (call-with-exception-value
        void
-       (Î» ()
+       (λ ()
          (for ([key (in-dict-keys (jsobject-data object))])
            (jskey-accumulator-add! keys key)))))
     #;on-apply
-    (Î» (context object this narguments arguments exception)
+    (λ (context object this narguments arguments exception)
       (call-with-exception-cell
        context exception
-       (Î» ()
+       (λ ()
          (scheme->js
           context
           (apply (jsobject-data object)
                 (build-list
                  narguments
-                 (Î» (i)
+                 (λ (i)
                    (js->scheme context (ptr-ref arguments _jsvalue i)))))))))
     #;on-make
     #f
     #;on-instanceof
     #f
     #;on-convert-to-type
-    (Î» (context object type exception)
+    (λ (context object type exception)
       (call-with-exception-cell
        context exception
-       (Î» ()
+       (λ ()
          (case type
            [(string)
             (make-jsvalue-string context (format "~s" (jsobject-data object)))]
@@ -540,14 +540,14 @@
   (context
    object this)
   #:guard
-  (Î» (context object this type)
+  (λ (context object this type)
     (jscontext-retain! context)
     (jsvalue-protect! context object)
     (when this
       (jsvalue-protect! context this))
     (values context object this))
   #:property prop:custom-write
-  (Î» (proxy out mode)
+  (λ (proxy out mode)
     (match-let ([(jsproxy context object _) proxy])
       (when mode (display "#<jsproxy:" out))
       (display (jsvalue->string context object) out)
@@ -555,8 +555,8 @@
   #:property prop:dict
   (vector
    #;on-ref
-   (Î» (proxy key [failure-result
-                  (Î» ()
+   (λ (proxy key [failure-result
+                  (λ ()
                     (raise
                      (make-exn:fail:contract
                       (format
@@ -564,48 +564,48 @@
                       (current-continuation-marks))))])
      (let/ec escape
        (call-with-exception-handler
-        (Î» (e)
+        (λ (e)
           (escape
            (if (procedure? failure-result) (failure-result) failure-result)))
-        (Î» ()
+        (λ ()
           (match-let ([(jsproxy context object _) proxy])
             (jsobject-ref context object key))))))
    #;on-set!
-   (Î» (proxy key value)
+   (λ (proxy key value)
      (match-let ([(jsproxy context object _) proxy])
        (jsobject-set! context object key value)))
    #;on-set
    #f
    #;on-remove!
-   (Î» (proxy key)
+   (λ (proxy key)
      (match-let ([(jsproxy context object _) proxy])
        (jsobject-remove! context object key)))
    #;on-remove
    #f
    #;on-count
-   (Î» (proxy)
+   (λ (proxy)
      (match-let ([(jsproxy context object _) proxy])
        (jskey-array-length (jsobject-keys context object))))
    #;on-iterate-first
-   (Î» (proxy)
+   (λ (proxy)
      (match-let ([(jsproxy context object _) proxy])
        (let ([i 0] [keys (jsobject-keys context object)])
          (and (< i (jskey-array-length keys))
               (cons i keys)))))
    #;on-iterate-next
-   (Î» (proxy pos)
+   (λ (proxy pos)
      (let ([i (add1 (car pos))] [keys (cdr pos)])
        (and (< i (jskey-array-length keys))
             (cons i keys))))
    #;on-iterate-key
-   (Î» (proxy pos)
+   (λ (proxy pos)
      (jskey-array-ref (cdr pos) (car pos)))
    #;on-iterate-value
-   (Î» (proxy pos)
+   (λ (proxy pos)
      (match-let ([(jsproxy context object _) proxy])
        (jsobject-ref context object (jskey-array-ref (cdr pos) (car pos))))))
   #:property prop:procedure
-  (Î» (proxy . arguments)
+  (λ (proxy . arguments)
     (match-let ([(jsproxy context object this) proxy])
       (jsobject-apply context object this arguments))))
 
