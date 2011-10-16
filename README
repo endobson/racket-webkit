@@ -1,0 +1,4 @@
+This is a library that embeds webkit in racket.
+
+To run examples:
+$ racket examples.rkt
