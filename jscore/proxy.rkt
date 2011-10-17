@@ -18,6 +18,7 @@
 
 
 ;; Scheme to JavaScript marshalling
+;; TODO: Fix exceptions so that they are proxied aswell
 
 (define (call-with-exception-protection v fun)
   (call-with-exception-handler
