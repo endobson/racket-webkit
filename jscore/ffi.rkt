@@ -3,14 +3,83 @@
  srfi/2
  srfi/17
  srfi/26
+ (rename-in racket/contract (-> c:->))
+ unstable/contract
  racket/dict
  racket/match
  ffi/unsafe
  ffi/unsafe/define
  ffi/unsafe/alloc)
 
+
+(provide
+ (contract-out
+  (_jscontext ctype?)
+  (_jscontext/null ctype?)
+  (jscontext? predicate/c)
+  (jscontext-retain! any/c) ;TODO
+  (jscontext-release! any/c) ;TODO
+  (import-jscontext (c:-> cpointer? jscontext?))
+
+  (_jsstring ctype?)
+  (_jsstring/null ctype?)
+  (jsstring? predicate/c)
+  (jsstring-release! any/c)
+  (string->jsstring (c:-> string? jsstring?))
+  (jsstring->string (c:-> jsstring? string?)))
+
+ _jsvalue
+ _jsvalue/null
+ jsvalue?
+ _jsobject
+ _jsobject/null
+ jsobject?
+ jsvalue-protect!
+ jsvalue-unprotect!
+ import-jsvalue
+ make-jsvalue-undefined
+ make-jsvalue-null
+ make-jsvalue-boolean
+ make-jsvalue-number
+ make-jsvalue-string
+ jsvalue-type
+ jsvalue->boolean
+ jsvalue->number
+ jsvalue->string
+ jsvalue->jsobject
+
+ _jskey-array
+ _jskey-array/null
+ jskey-array?
+ jskey-array-release!
+ jskey-array-length
+ jskey-array-ref
+
+ jskey-accumulator-add!
+
+ jsobject-ref 
+ jsobject-set!
+ jsobject-remove!
+ jsobject-keys
+ jsobject-apply
+ 
+ make-jsclass
+ make-jsobject
+ jsobject-data
+ jsvalue-is-a?)
+
+
+
+
 (define-ffi-definer define/native
-  (ffi-lib "libwebkit-1.0" '("2" #f)))
+  (ffi-lib "/System/Library/Frameworks/WebKit.framework/WebKit"))
+
+(struct exn:fail:js exn:fail (value) #:transparent)
+(provide
+ (contract-out
+  (struct (exn:fail:js exn:fail) ((message string?)
+                                  (continuation-marks continuation-mark-set?)
+                                  (value jsvalue?)))))
 
 ;; Contexts
 (define-cpointer-type _jscontext)
@@ -27,11 +96,6 @@
 
 (define (import-jscontext v)
   (cast v _pointer _jscontext))
-
-(provide
-  _jscontext _jscontext/null jscontext?
-  jscontext-retain! jscontext-release!
-  import-jscontext)
 
 ;; Strings
 (define-cpointer-type _jsstring)
@@ -59,19 +123,13 @@
         -> (bytes->string/utf-8 data #f 0 (sub1 size)))
   #:c-id JSStringGetUTF8CString)
 
-(provide
- _jsstring _jsstring/null jsstring?
- jsstring-release!
- string->jsstring jsstring->string)
-
 ;; Generic values and objects
 (define _jstype
   (_enum '(undefined null boolean number string object)))
 
 (define-cpointer-type _jsvalue)
 
-(define-values (_jsobject _jsobject/null jsobject?)
-  (values _jsvalue _jsvalue/null jsvalue?))
+(define-cpointer-type _jsobject _jsvalue)
 
 (define/native jsvalue-unprotect!
   (_fun [context : _jscontext] [value : _jsvalue] -> _void)
@@ -80,7 +138,7 @@
 
 (define/native jsvalue-protect!
   (_fun [context : _jscontext] [value : _jsvalue] -> _void)
-  #:wrap (retainer jsvalue-unprotect!)
+  #:wrap (retainer jsvalue-unprotect! cadr)
   #:c-id JSValueProtect)
 
 (define (import-jsvalue v)
@@ -120,7 +178,9 @@
   (_fun [context : _jscontext] [value : _jsvalue]
         [e : (_ptr io _jsvalue/null) = #f] -> [v : _double]
         -> (if e
-               (raise (js->scheme context e))
+               (begin
+                 (jsvalue-protect! context e)
+                 (raise (exn:fail:js "jsvalue->number: failed" (current-continuation-marks) e)))
                v))
   #:c-id JSValueToBoolean)
 
@@ -128,7 +188,9 @@
   (_fun [context : _jscontext] [value : _jsvalue]
         [e : (_ptr io _jsvalue/null) = #f] -> [v : _jsstring/null]
         -> (if e
-               (raise (js->scheme context e))
+               (begin
+                 (jsvalue-protect! context e)
+                 (raise (exn:fail:js "jsvalue->string: failed" (current-continuation-marks) e)))
                (begin0
                  (jsstring->string v)
                  (jsstring-release! v))))
@@ -138,26 +200,11 @@
   (_fun [context : _jscontext] [value : _jsvalue]
         [e : (_ptr io _jsvalue/null) = #f] -> [v : _jsobject/null]
         -> (if e
-               (raise (js->scheme context e))
+               (begin
+                 (jsvalue-protect! context e)
+                 (raise (exn:fail:js "jsvalue->jsobject: failed" (current-continuation-marks) e)))
                v))
   #:c-id JSValueToObject)
-
-(provide
- _jsvalue _jsvalue/null jsvalue?
- _jsobject _jsobject/null jsobject?
- jsvalue-protect!
- jsvalue-unprotect!
- import-jsvalue
- make-jsvalue-undefined
- make-jsvalue-null
- make-jsvalue-boolean
- make-jsvalue-number
- make-jsvalue-string
- jsvalue-type
- jsvalue->boolean
- jsvalue->number
- jsvalue->string
- jsvalue->jsobject)
 
 ;; Property name arrays
 (define-cpointer-type _jskey-array)
@@ -174,12 +221,6 @@
 (define/native jskey-array-ref
   (_fun [array : _jskey-array] [i : _uint] -> [key : _jsstring])
   #:c-id JSPropertyNameArrayGetNameAtIndex)
-
-(provide
- _jskey-array _jskey-array/null jskey-array?
- jskey-array-release!
- jskey-array-length
- jskey-array-ref)
 
 ;; Property name accumulators
 (define-cpointer-type _jskey-accumulator)
@@ -207,43 +248,67 @@
    [static-values _pointer]
    [static-functions _pointer]
    [on-initialize
-    (_fun [context : _jscontext] [object : _jsobject]
+    (_fun [context : _jscontext]
+          [object : _jsobject]
           -> _void)]
    [on-finalize
-    _fpointer]
+    _fpointer] ;Why
    [on-has-key
-    (_fun [context : _jscontext] [object : _jsobject]
+    (_fun [context : _jscontext]
+          [object : _jsobject]
           [key : _jsstring]
           -> [? : _bool])]
    [on-ref
-    (_fun [context : _jscontext] [object : _jsobject]
+    (_fun [context : _jscontext]
+          [object : _jsobject]
           [key : _jsstring]
-          [e : _pointer] -> [v : _jsvalue])]
+          [e : _pointer]
+          -> [v : _jsvalue])]
    [on-set
-    (_fun [context : _jscontext] [object : _jsobject]
-          [key : _jsstring] [v : _jsvalue]
-          [e : _pointer] -> [ok? : _bool])]
-   [on-remove
-    (_fun [context : _jscontext] [object : _jsobject]
+    (_fun [context : _jscontext]
+          [object : _jsobject]
           [key : _jsstring]
-          [e : _pointer] -> [ok? : _bool])]
+          [v : _jsvalue]
+          [e : _pointer]
+          -> [ok? : _bool])]
+   [on-remove
+    (_fun [context : _jscontext]
+          [object : _jsobject]
+          [key : _jsstring]
+          [e : _pointer]
+          -> [ok? : _bool])]
    [on-keys
-    (_fun [context : _jscontext] [object : _jsobject]
-          [keys : _jskey-accumulator] -> _void)]
+    (_fun [context : _jscontext]
+          [object : _jsobject]
+          [keys : _jskey-accumulator]
+          -> _void)]
    [on-apply
-    (_fun [context : _jscontext] [object : _jsobject] [this : _jsobject]
-          [narguments : _uint] [arguments : _pointer]
-          [e : _pointer] -> [v : _jsvalue])]
+    (_fun [context : _jscontext]
+          [object : _jsobject]
+          [this : _jsobject]
+          [narguments : _uint]
+          [arguments : _pointer]
+          [e : _pointer]
+          -> [v : _jsvalue])]
    [on-make
-    (_fun [context : _jscontext] [object : _jsobject]
-          [narguments : _uint] [arguments : _pointer]
-          [e : _pointer] -> [v : _jsvalue])]
+    (_fun [context : _jscontext]
+          [object : _jsobject]
+          [narguments : _uint]
+          [arguments : _pointer]
+          [e : _pointer]
+          -> [v : _jsvalue])]
    [on-instanceof
-    (_fun [context : _jscontext] [object : _jsobject] [instance : _jsobject]
-          [e : _pointer] -> [? : _bool])]
+    (_fun [context : _jscontext]
+          [object : _jsobject]
+          [instance : _jsobject]
+          [e : _pointer]
+          -> [? : _bool])]
    [on-convert-to-type
-    (_fun [context : _jscontext] [object : _jsobject] [type : _jstype]
-          [e : _pointer] -> [v : _jsvalue])]))
+    (_fun [context : _jscontext]
+          [object : _jsobject]
+          [type : _jstype]
+          [e : _pointer]
+          -> [v : _jsvalue])]))
 
 (define/native jsclass-info:empty
   _jsclass-info
@@ -351,13 +416,14 @@
         :: [context : _jscontext]
            [object : _jsobject]
            [key : _jsstring = (ensure-jskey 'jsobject-set! key)]
-           [v : _jsvalue = (scheme->js context v)]
+           [v : _jsvalue = (racket->js context v)]
            [attributes : (_bitmask '(read-only = 2
                                      dont-enumerate = 4
                                      dont-remove = 8))]
         [e : (_ptr io _jsvalue/null) = #f] -> _void
         -> (when e
-             (raise (js->scheme context e))))
+             (jsvalue-protect! context e)
+             (raise (exn:fail:js "jsobject-set!: failed" (current-continuation-marks) e))))
   #:c-id JSObjectSetProperty)
 
 (define/native jsobject-ref
@@ -367,9 +433,10 @@
            [key : _jsstring = (ensure-jskey 'jsobject-ref key)]
         [e : (_ptr io _jsvalue/null) = #f] -> [v : _jsvalue/null]
         -> (if e
-               (raise (js->scheme context e))
-               (js->scheme context v object)))
-  #:wrap (cut getter-with-setter <> jsobject-set!)
+               (begin
+                 (jsvalue-protect! context e)
+                 (raise (exn:fail:js "jsobject-ref: failed" (current-continuation-marks) e)))
+               v))
   #:c-id JSObjectGetProperty)
 
 (define/native jsobject-remove!
@@ -379,7 +446,9 @@
            [key : _jsstring = (ensure-jskey 'jsobject-remove! key)]
         [e : (_ptr io _jsvalue/null) = #f] -> [ok? : _bool]
         -> (if e
-               (raise (js->scheme context e))
+               (begin
+                 (jsvalue-protect! context e)
+                 (raise (exn:fail:js "jsobject-remove: failed" (current-continuation-marks) e)))
                ok?))
   #:c-id JSObjectDeleteProperty)
 
@@ -395,127 +464,17 @@
            [narguments : _uint
                        = (length arguments)]
            [arguments : (_list i _jsvalue)
-                      = (map (cut scheme->js context <>) arguments)]
+                      = (map (cut racket->js context <>) arguments)]
         [e : (_ptr io _jsvalue/null) = #f] -> [v : _jsvalue/null]
         -> (if e
-               (raise (js->scheme context e))
+               (begin
+                 (jsvalue-protect! context e)
+                 (raise (exn:fail:js "jsobject-apply: failed" (current-continuation-marks) e)))
                v))
   #:c-id JSObjectCallAsFunction)
 
-(provide
- jsobject-ref jsobject-set!
- jsobject-remove!
- jsobject-keys
- jsobject-apply)
-
-;; Scheme to JavaScript marshalling
-(define (call-with-exception-value value thunk)
-  (let/ec escape
-    (call-with-exception-handler
-     (λ (e)
-       (escape (if (procedure? value) (value) value)))
-     thunk)))
-
-(define (call-with-exception-cell context exception thunk)
-  (let/ec escape
-    (ptr-set! exception _jsvalue/null #f)
-    (call-with-exception-handler
-     (λ (e)
-       (ptr-set! exception _jsvalue/null (scheme->js context e))
-       (escape #f))
-     thunk)))
-
-(define (ensure-dict+key name dict v)
-  (cond
-    [(and (string? v)
-          (or (and (dict-has-key? dict v) v)
-              (and-let* ([v (string->symbol v)] [(dict-has-key? dict v)]) v)
-              (and-let* ([v (string->number v)] [(dict-has-key? dict v)]) v)))
-     => (cut values dict <>)]
-    [else
-     (raise-type-error
-      name "string matching string, symbol or number key" 1 dict v)]))
-
-(define jsclass:scheme-proxy
-  (make-jsclass
-   'SchemeProxy
-   (vector
-    #;on-initialize
-    #f
-    #;on-has-key
-    (λ (context object key)
-      (call-with-exception-value
-       #f
-       (λ ()
-         (ensure-dict+key 'dict-has-key?
-                          (jsobject-data object) (jsstring->string key))
-         #t)))
-    #;on-ref
-    (λ (context object key exception)
-      (call-with-exception-cell
-       context exception
-       (λ ()
-         (scheme->js
-          context
-          (call-with-values
-           (cut ensure-dict+key 'dict-ref
-                (jsobject-data object) (jsstring->string key))
-           dict-ref)))))
-    #;on-set
-    (λ (context object key value exception)
-      (call-with-exception-cell
-       context exception
-       (λ ()
-         (call-with-values
-          (cut ensure-dict+key 'dict-set!
-               (jsobject-data object) (jsstring->string key))
-          (cut dict-set! <> <> (js->scheme context value)))
-         #t)))
-    #;on-remove
-    (λ (context object key exception)
-      (call-with-exception-cell
-       context exception
-       (λ ()
-         (call-with-values
-          (cut ensure-dict+key 'dict-remove!
-               (jsobject-data object) (jsstring->string key))
-          dict-remove!)
-         #t)))
-    #;on-keys
-    (λ (context object keys)
-      (call-with-exception-value
-       void
-       (λ ()
-         (for ([key (in-dict-keys (jsobject-data object))])
-           (jskey-accumulator-add! keys key)))))
-    #;on-apply
-    (λ (context object this narguments arguments exception)
-      (call-with-exception-cell
-       context exception
-       (λ ()
-         (scheme->js
-          context
-          (apply (jsobject-data object)
-                (build-list
-                 narguments
-                 (λ (i)
-                   (js->scheme context (ptr-ref arguments _jsvalue i)))))))))
-    #;on-make
-    #f
-    #;on-instanceof
-    #f
-    #;on-convert-to-type
-    (λ (context object type exception)
-      (call-with-exception-cell
-       context exception
-       (λ ()
-         (case type
-           [(string)
-            (make-jsvalue-string context (format "~s" (jsobject-data object)))]
-           [else
-            #f])))))))
-  
-(define (scheme->js context v)
+;Helper for simple conversions
+(define (racket->js context v)
   (cond
     [(void? v)
      (make-jsvalue-undefined context)]
@@ -526,106 +485,6 @@
     [(number? v)
      (make-jsvalue-number context v)]
     [(string? v)
-     (make-jsvalue-string context v)]
-    [(jsproxy? v)
-     (jsproxy-object v)]
-    [else
-     (make-jsobject context jsclass:scheme-proxy v)]))
+     (make-jsvalue-string context v)]))
 
-(provide
- scheme->js)
 
-;; JavaScript to Scheme marshalling
-(define-struct jsproxy
-  (context
-   object this)
-  #:guard
-  (λ (context object this type)
-    (jscontext-retain! context)
-    (jsvalue-protect! context object)
-    (when this
-      (jsvalue-protect! context this))
-    (values context object this))
-  #:property prop:custom-write
-  (λ (proxy out mode)
-    (match-let ([(jsproxy context object _) proxy])
-      (when mode (display "#<jsproxy:" out))
-      (display (jsvalue->string context object) out)
-      (when mode (display #\> out))))
-  #:property prop:dict
-  (vector
-   #;on-ref
-   (λ (proxy key [failure-result
-                  (λ ()
-                    (raise
-                     (make-exn:fail:contract
-                      (format
-                       "~s: no value found for key: ~e" 'dict-ref key)
-                      (current-continuation-marks))))])
-     (let/ec escape
-       (call-with-exception-handler
-        (λ (e)
-          (escape
-           (if (procedure? failure-result) (failure-result) failure-result)))
-        (λ ()
-          (match-let ([(jsproxy context object _) proxy])
-            (jsobject-ref context object key))))))
-   #;on-set!
-   (λ (proxy key value)
-     (match-let ([(jsproxy context object _) proxy])
-       (jsobject-set! context object key value)))
-   #;on-set
-   #f
-   #;on-remove!
-   (λ (proxy key)
-     (match-let ([(jsproxy context object _) proxy])
-       (jsobject-remove! context object key)))
-   #;on-remove
-   #f
-   #;on-count
-   (λ (proxy)
-     (match-let ([(jsproxy context object _) proxy])
-       (jskey-array-length (jsobject-keys context object))))
-   #;on-iterate-first
-   (λ (proxy)
-     (match-let ([(jsproxy context object _) proxy])
-       (let ([i 0] [keys (jsobject-keys context object)])
-         (and (< i (jskey-array-length keys))
-              (cons i keys)))))
-   #;on-iterate-next
-   (λ (proxy pos)
-     (let ([i (add1 (car pos))] [keys (cdr pos)])
-       (and (< i (jskey-array-length keys))
-            (cons i keys))))
-   #;on-iterate-key
-   (λ (proxy pos)
-     (jskey-array-ref (cdr pos) (car pos)))
-   #;on-iterate-value
-   (λ (proxy pos)
-     (match-let ([(jsproxy context object _) proxy])
-       (jsobject-ref context object (jskey-array-ref (cdr pos) (car pos))))))
-  #:property prop:procedure
-  (λ (proxy . arguments)
-    (match-let ([(jsproxy context object this) proxy])
-      (jsobject-apply context object this arguments))))
-
-(define (js->scheme context v [this #f])
-  (case (jsvalue-type context v)
-    [(undefined)
-     (void)]
-    [(null)
-     #\null]
-    [(boolean)
-     (jsvalue->boolean context v)]
-    [(number)
-     (jsvalue->number context v)]
-    [(string)
-     (jsvalue->string context v)]
-    [(object)
-     (if (jsvalue-is-a? context v jsclass:scheme-proxy)
-         (jsobject-data v)
-         (make-jsproxy context v this))]))
-
-(provide
- jsproxy?
- js->scheme)
