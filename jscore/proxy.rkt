@@ -1,24 +1,40 @@
 #lang racket/base
 
-(require "ffi.rkt")
+;; Scheme to JavaScript marshalling
+
+(require
+  (rename-in "ffi.rkt"
+             (struct:exn:fail:js struct:ffi:exn:fail:js)
+             (exn:fail:js ffi:exn:fail:js)
+             (exn:fail:js? ffi:exn:fail:js?)
+             (exn:fail:js-value ffi:exn:fail:js-value)))
 (require
   racket/port
   racket/contract
   unstable/contract
   racket/dict
   racket/match
+  racket/function
   (except-in ffi/unsafe ->))
 
 (provide
  (contract-out
-  (_jsproxy ctype?)
+  (_jscontext ctype?)
+  (_jsproxy (-> jscontext? ctype?))
+  (js-has-key? (-> jsproxy? js-key? boolean?))
+  (js-method-ref (-> jsproxy? js-key? (->* () () #:rest (listof any/c) any/c)))
   (jsproxy? predicate/c)
   (js-key? predicate/c)))
 
 
+(struct exn:fail:js exn:fail (value) #:transparent)
+(provide
+ (contract-out
+  (struct (exn:fail:js exn:fail) ((message string?)
+                                  (continuation-marks continuation-mark-set?)
+                                  (value any/c)))))
 
-;; Scheme to JavaScript marshalling
-;; TODO: Fix exceptions so that they are proxied aswell
+
 
 (define (call-with-exception-protection v fun)
   (call-with-exception-handler
@@ -38,6 +54,15 @@
        (ptr-set! exception _jsvalue (scheme->js context e))
        (escape #f))
      thunk)))
+
+(define (call-with-exception-wrapper context thunk)
+  (call-with-exception-handler
+    (lambda (v)
+      (match v
+       ((ffi:exn:fail:js message marks value)
+        (exn:fail:js message marks (js->scheme context value)))
+       (_ v)))
+    thunk))
 
 (define (dict-has-js-key-of-string? dict str)
   (or
@@ -137,6 +162,7 @@
     #f
     #;on-convert-to-type
     (λ (context object type exception)
+       (displayln "convert-to-type")
       (call-with-exception-cell
        context exception
        (λ ()
@@ -190,26 +216,26 @@
                         (format
                          "~s: no value found for key: ~e" 'dict-ref key)
                         (current-continuation-marks))))])
-       (let/ec return
-         ((let/ec tail-call
-            (call-with-exception-handler
-             (λ (e)
-               (if (procedure? failure-result)
-                 (tail-call failure-result)
-                 (return failure-result)))
-             (λ ()
-               (match-let ([(jsproxy context object) proxy])
-                 (return (jsobject-ref context object key)))))))))
+        (match-let ([(jsproxy context object) proxy])
+          (if (jsobject-has-key? context object key)
+              (js->scheme context 
+                (call-with-exception-wrapper context (lambda ()
+                  (jsobject-ref context object key))))
+              (if (procedure? failure-result)
+                  (failure-result)
+                  failure-result))))
      #;on-set!
      (λ (proxy key value)
        (match-let ([(jsproxy context object) proxy])
-         (jsobject-set! context object key (scheme->js value))))
+         (call-with-exception-wrapper context (lambda ()
+           (jsobject-set! context object key (scheme->js value))))))
      #;on-set
      #f
      #;on-remove!
      (λ (proxy key)
        (match-let ([(jsproxy context object) proxy])
-         (jsobject-remove! context object key)))
+         (call-with-exception-wrapper context (lambda ()
+           (jsobject-remove! context object key)))))
      #;on-remove
      #f
      #;on-count
@@ -233,7 +259,9 @@
      #;on-iterate-value
      (λ (proxy pos)
        (match-let ([(jsproxy context object) proxy])
-         (jsobject-ref context object (jskey-array-ref (cdr pos) (car pos))))))
+         (js->scheme context
+           (call-with-exception-wrapper context (lambda ()
+             (jsobject-ref context object (jskey-array-ref (cdr pos) (car pos)))))))))
   (vector-immutable
     js-key?
     any/c
@@ -242,9 +270,20 @@
     #f
     #f))
   #:property prop:procedure
-  (λ (proxy #:this (this #f) . arguments)
+  (λ (proxy #:this (this #\null) . arguments)
     (match-let ([(jsproxy context object) proxy])
-      (jsobject-apply context object this arguments))))
+      (js->scheme context
+        (call-with-exception-wrapper context (lambda ()
+          (jsobject-apply context object (scheme->js context this)
+                          (map (curry scheme->js context) arguments))))))))
+
+(define (js-has-key? proxy key)
+  (match-let ([(jsproxy context object) proxy])
+    (jsobject-has-key? context object key)))
+
+(define (js-method-ref proxy key)
+  (let ((v (dict-ref proxy key)))
+    (lambda args (apply v #:this proxy args))))
 
 (define (js->scheme context v)
   (case (jsvalue-type context v)
@@ -261,8 +300,9 @@
     [(object)
      (if (jsvalue-is-a? context v jsclass:scheme-proxy)
          (jsobject-data v)
-         (make-jsproxy context v))]))
+         (make-jsproxy context (jsvalue->jsobject context v)))]))
 
-(define _jsproxy
-  (make-ctype _jsobject scheme->js js->scheme))
-
+(define (_jsproxy context)
+  (make-ctype _jsvalue 
+    (curry scheme->js context)
+    (curry js->scheme context)))

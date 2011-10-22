@@ -6,11 +6,13 @@
  (rename-in racket/contract (-> c:->))
  unstable/contract
  racket/dict
+ racket/function
  racket/match
  ffi/unsafe
  ffi/unsafe/define
  ffi/unsafe/alloc)
 
+;TODO make symbols not crash and burn
 
 (provide
  (contract-out
@@ -57,11 +59,13 @@
 
  jskey-accumulator-add!
 
+ jsobject-has-key?
  jsobject-ref 
  jsobject-set!
  jsobject-remove!
  jsobject-keys
- jsobject-apply
+ (contract-out
+  (jsobject-apply (c:-> jscontext? jsobject? (option/c jsobject?) (listof jsvalue?) jsvalue?)))
  
  make-jsclass
  make-jsobject
@@ -129,7 +133,7 @@
 
 (define-cpointer-type _jsvalue)
 
-(define-cpointer-type _jsobject _jsvalue)
+(define-cpointer-type _jsobject _jsvalue/null)
 
 (define/native jsvalue-unprotect!
   (_fun [context : _jscontext] [value : _jsvalue] -> _void)
@@ -180,7 +184,7 @@
         -> (if e
                (begin
                  (jsvalue-protect! context e)
-                 (raise (exn:fail:js "jsvalue->number: failed" (current-continuation-marks) e)))
+                 (raise (exn:fail:js (format "jsvalue->number: ~e" (jsvalue->string context e)) (current-continuation-marks) e)))
                v))
   #:c-id JSValueToBoolean)
 
@@ -202,7 +206,7 @@
         -> (if e
                (begin
                  (jsvalue-protect! context e)
-                 (raise (exn:fail:js "jsvalue->jsobject: failed" (current-continuation-marks) e)))
+                 (raise (exn:fail:js (format "jsvalue->jsobject: ~e" (jsvalue->string context e)) (current-continuation-marks) e)))
                v))
   #:c-id JSValueToObject)
 
@@ -423,7 +427,7 @@
         [e : (_ptr io _jsvalue/null) = #f] -> _void
         -> (when e
              (jsvalue-protect! context e)
-             (raise (exn:fail:js "jsobject-set!: failed" (current-continuation-marks) e))))
+             (raise (exn:fail:js (format "jsobject-set!: ~e" (jsvalue->string context e)) (current-continuation-marks) e))))
   #:c-id JSObjectSetProperty)
 
 (define/native jsobject-ref
@@ -435,9 +439,19 @@
         -> (if e
                (begin
                  (jsvalue-protect! context e)
-                 (raise (exn:fail:js "jsobject-ref: failed" (current-continuation-marks) e)))
+                 (raise (exn:fail:js (format "jsobject-ref: ~e" (jsvalue->string context e)) (current-continuation-marks) e)))
                v))
   #:c-id JSObjectGetProperty)
+
+(define/native jsobject-has-key?
+  (_fun (context object key)
+        :: [context : _jscontext]
+           [object : _jsobject]
+           [key : _jsstring = (ensure-jskey 'jsobject-ref key)]
+        -> _bool)
+  #:c-id JSObjectGetProperty)
+
+
 
 (define/native jsobject-remove!
   (_fun (context object key)
@@ -448,7 +462,7 @@
         -> (if e
                (begin
                  (jsvalue-protect! context e)
-                 (raise (exn:fail:js "jsobject-remove: failed" (current-continuation-marks) e)))
+                 (raise (exn:fail:js (format "jsobject-remove: ~e" (jsvalue->string context e)) (current-continuation-marks) e)))
                ok?))
   #:c-id JSObjectDeleteProperty)
 
@@ -460,22 +474,24 @@
 (define/native jsobject-apply
   (_fun (context object this arguments)
         :: [context : _jscontext]
-           [object : _jsobject] [this : _jsobject/null]
-           [narguments : _uint
-                       = (length arguments)]
-           [arguments : (_list i _jsvalue)
-                      = (map (cut racket->js context <>) arguments)]
-        [e : (_ptr io _jsvalue/null) = #f] -> [v : _jsvalue/null]
+           [object : _jsobject]
+           [this : _jsobject/null]
+           [narguments : _uint = (length arguments)]
+           [arguments : (_list i _jsvalue) =
+             (map (curry racket->js context) arguments)]
+        [e : (_ptr io _jsvalue/null) = #f]
+        -> [v : _jsvalue/null]
         -> (if e
                (begin
                  (jsvalue-protect! context e)
-                 (raise (exn:fail:js "jsobject-apply: failed" (current-continuation-marks) e)))
+                 (raise (exn:fail:js (format "jsobject-apply: ~e" (jsvalue->string context e)) (current-continuation-marks) e)))
                v))
   #:c-id JSObjectCallAsFunction)
 
 ;Helper for simple conversions
 (define (racket->js context v)
   (cond
+    [(jsvalue? v) v]
     [(void? v)
      (make-jsvalue-undefined context)]
     [(eqv? v #\null)
